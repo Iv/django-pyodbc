@@ -6,5 +6,5 @@
 Thumbs.db
 
 *.egg-info
-
+build/*
 tests/local_settings.py
