@@ -2,3 +2,13 @@
 build/
 dist/
 django_pyodbc.egg-info/
+*.py[co]
+*.sw[a-z]
+*.orig
+*~
+.DS_Store
+Thumbs.db
+
+*.egg-info
+build/*
+tests/local_settings.py

@@ -274,21 +274,32 @@ class SQLCompiler(compiler.SQLCompiler):
 
 
 class SQLInsertCompiler(compiler.SQLInsertCompiler, SQLCompiler):
-    def as_sql(self):
+
+    def as_sql_legacy(self):
         # We don't need quote_name_unless_alias() here, since these are all
         # going to be column names (so we can avoid the extra overhead).
         qn = self.connection.ops.quote_name
         opts = self.query.model._meta
-        result = ['INSERT INTO %s' % qn(opts.db_table)]
+        returns_id = bool(self.return_id and
+                          self.connection.features.can_return_id_from_insert)
+
+        if returns_id:
+            result = ['SET NOCOUNT ON']
+        else:
+            result = []
+
+        result.append('INSERT INTO %s' % qn(opts.db_table))
         result.append('(%s)' % ', '.join([qn(c) for c in self.query.columns]))
-        if self.return_id and self.connection.features.can_return_id_from_insert:
-            output = 'OUTPUT inserted.%s' % qn(opts.pk.column)
-            result.append(output)
+
         values = [self.placeholder(*v) for v in self.query.values]
         result.append('VALUES (%s)' % ', '.join(values))
+
+        if returns_id:
+            result.append(';\nSELECT SCOPE_IDENTITY()')
+
         params = self.query.params
         sql = ' '.join(result)
-        
+
         meta = self.query.get_meta()
         if meta.has_auto_field:
             # db_column is None if not explicitly specified by model field
@@ -296,12 +307,97 @@ class SQLInsertCompiler(compiler.SQLInsertCompiler, SQLCompiler):
 
             if auto_field_column in self.query.columns:
                 quoted_table = self.connection.ops.quote_name(meta.db_table)
-                if len(self.query.columns) == 1 and not params:
-                    sql = "INSERT INTO %s DEFAULT VALUES" % quoted_table
+                if returns_id:
+                    sql = "SET NOCOUNT ON"
                 else:
-                    sql = "SET IDENTITY_INSERT %s ON;\n%s;\nSET IDENTITY_INSERT %s OFF" % \
+                    sql = ""
+
+                if len(self.query.columns) == 1 and not params:
+                    sql += "INSERT INTO %s DEFAULT VALUES" % quoted_table
+                else:
+                    sql += "SET IDENTITY_INSERT %s ON;\n%s;\nSET IDENTITY_INSERT %s OFF" % \
                         (quoted_table, sql, quoted_table)
+
+                if returns_id:
+                    sql += '\n;SELECT SCOPE_IDENTITY()'
+
         return sql, params
+
+    def as_sql(self):
+        if self.connection._DJANGO_VERSION < 14:
+            return self.as_sql_legacy()
+
+        # We don't need quote_name_unless_alias() here, since these are all
+        # going to be column names (so we can avoid the extra overhead).
+        qn = self.connection.ops.quote_name
+        opts = self.query.model._meta
+        returns_id = bool(self.return_id and
+                          self.connection.features.can_return_id_from_insert)
+
+        if returns_id:
+            result = ['SET NOCOUNT ON']
+        else:
+            result = []
+
+        result.append('INSERT INTO %s' % qn(opts.db_table))
+
+        has_fields = bool(self.query.fields)
+        fields = self.query.fields if has_fields else [opts.pk]
+        columns = [f.column for f in fields]
+
+        result.append('(%s)' % ', '.join([qn(c) for c in columns]))
+
+        if has_fields:
+            params = values = [
+                [
+                    f.get_db_prep_save(getattr(obj, f.attname) if self.query.raw else f.pre_save(obj, True), connection=self.connection)
+                    for f in fields
+                ]
+                for obj in self.query.objs
+            ]
+        else:
+            values = [[self.connection.ops.pk_default_value()] for obj in self.query.objs]
+            params = [[]]
+            fields = [None]
+
+        placeholders = [
+            [self.placeholder(field, v) for field, v in zip(fields, val)]
+            for val in values
+        ]
+
+        if returns_id:
+            params = params[0]
+            result.append("VALUES (%s)" % ", ".join(placeholders[0]))
+            result.append('\n;SELECT SCOPE_IDENTITY()')
+            return [(" ".join(result), tuple(params))]
+
+        items = [
+            (" ".join(result + ["VALUES (%s)" % ", ".join(p)]), vals)
+            for p, vals in zip(placeholders, params)
+        ]
+
+        # This section deals with specifically setting the primary key,
+        # or using default values if necessary
+        meta = self.query.get_meta()
+        if meta.has_auto_field:
+            # db_column is None if not explicitly specified by model field
+            auto_field_column = meta.auto_field.db_column or meta.auto_field.column
+
+            out = []
+            for item in items:
+                sql, params = item
+                if auto_field_column in columns:
+                    quoted_table = self.connection.ops.quote_name(meta.db_table)
+                    # If there are no fields specified in the insert..
+                    if not has_fields:
+                        sql = "INSERT INTO %s DEFAULT VALUES" % quoted_table
+                    else:
+                        sql = "SET IDENTITY_INSERT %s ON;\n%s;\nSET IDENTITY_INSERT %s OFF" % \
+                            (quoted_table, sql, quoted_table)
+                out.append([sql, params])
+            items = out
+
+        return items
 
 
 class SQLDeleteCompiler(compiler.SQLDeleteCompiler, SQLCompiler):
