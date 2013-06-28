@@ -7,11 +7,7 @@ import decimal
 class DatabaseOperations(BaseDatabaseOperations):
     compiler_module = "sql_server.pyodbc.compiler"
     def __init__(self, connection):
-        if connection._DJANGO_VERSION >= 14:
-            super(DatabaseOperations, self).__init__(connection)
-        else:
-            super(DatabaseOperations, self).__init__()
-
+        super(DatabaseOperations, self).__init__(connection)
         self.connection = connection
         self._ss_ver = None
 
